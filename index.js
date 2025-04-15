@@ -94,10 +94,14 @@ app.delete('/rides/:id', async (req, res) => {
 
 // USERS ENDPOINTS (CRUD)
 
-// 1️⃣ POST /users – Create a new user
 app.post('/users', async (req, res) => {
   try {
     const user = req.body;
+
+    if (!user.role) {
+      return res.status(400).json({ error: 'User role is required (e.g., customer or driver)' });
+    }
+
     const result = await db.collection('users').insertOne(user);
     res.status(201).json({ message: 'User created', userId: result.insertedId });
   } catch (err) {
@@ -105,7 +109,6 @@ app.post('/users', async (req, res) => {
   }
 });
 
-// 2️⃣ GET /users – Get all users
 app.get('/users', async (req, res) => {
   try {
     const users = await db.collection('users').find().toArray();
@@ -115,7 +118,6 @@ app.get('/users', async (req, res) => {
   }
 });
 
-// 3️⃣ PATCH /users/:id – Update user by ID
 app.patch('/users/:id', async (req, res) => {
   const { id } = req.params;
   const updateData = req.body;
@@ -136,7 +138,6 @@ app.patch('/users/:id', async (req, res) => {
   }
 });
 
-// 4️⃣ DELETE /users/:id – Delete user by ID
 app.delete('/users/:id', async (req, res) => {
   const { id } = req.params;
 
@@ -153,6 +154,171 @@ app.delete('/users/:id', async (req, res) => {
   }
 });
 
+app.post('/auth/customer', async (req, res) => {
+  const { email, password } = req.body;
+  try {
+    const user = await db.collection('users').findOne({ email, password, role: 'customer' });
+    if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+    res.status(200).json({ message: 'Customer login successful', user });
+  } catch (err) {
+    res.status(500).json({ error: 'Login failed', details: err });
+  }
+});
+
+app.post('/auth/driver', async (req, res) => {
+  const { email, password } = req.body;
+  try {
+    const driver = await db.collection('users').findOne({ email, password, role: 'driver' });
+    if (!driver) return res.status(401).json({ error: 'Invalid credentials' });
+    res.status(200).json({ message: 'Driver login successful', driver });
+  } catch (err) {
+    res.status(500).json({ error: 'Login failed', details: err });
+  }
+});
+
+// 🚗 DRIVER APIs
+app.patch('/drivers/:id/availability', async (req, res) => {
+  const { id } = req.params;
+  const { availability } = req.body;
+  try {
+    const result = await db.collection('users').updateOne(
+      { _id: new ObjectId(id), role: 'driver' },
+      { $set: { availability } }
+    );
+    if (result.modifiedCount === 1) {
+      res.status(200).json({ message: 'Availability updated' });
+    } else {
+      res.status(404).json({ error: 'Driver not found' });
+    }
+  } catch (err) {
+    res.status(500).json({ error: 'Update failed', details: err });
+  }
+});
+
+// ✅ UPDATED: PATCH /drivers/:id/status - Update driver status using MongoDB
+app.patch('/drivers/:id/status', async (req, res) => {
+  const { id } = req.params;
+  const { status } = req.body;
+
+  if (!status) {
+    return res.status(400).json({ message: 'Status is required' });
+  }
+
+  try {
+    const result = await db.collection('users').updateOne(
+      { _id: new ObjectId(id), role: 'driver' },
+      { $set: { status } }
+    );
+
+    if (result.modifiedCount === 1) {
+      res.status(200).json({ message: 'Driver status updated' });
+    } else {
+      res.status(404).json({ message: 'Driver not found or status unchanged' });
+    }
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to update driver status', details: err });
+  }
+});
+
+// ✅ UPDATED: DELETE /admin/users/:id - Block/Delete user using MongoDB
+app.delete('/admin/users/:id', async (req, res) => {
+  const { id } = req.params;
+  const { requesterRole } = req.body;
+
+  if (requesterRole !== 'admin') {
+    return res.status(403).json({ message: 'Access denied. Admins only.' });
+  }
+
+  try {
+    const result = await db.collection('users').deleteOne({ _id: new ObjectId(id) });
+
+    if (result.deletedCount === 1) {
+      res.status(204).send(); // No Content
+    } else {
+      res.status(404).json({ message: 'User not found' });
+    }
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to delete user', details: err });
+  }
+});
+
+// 🛡️ ADMIN APIs
+app.patch('/admin/users/:id/block', async (req, res) => {
+  const { id } = req.params;
+  const { blocked } = req.body;
+  try {
+    const result = await db.collection('users').updateOne(
+      { _id: new ObjectId(id) },
+      { $set: { blocked } }
+    );
+    if (result.modifiedCount === 1) {
+      res.status(200).json({ message: `User ${blocked ? 'blocked' : 'unblocked'}` });
+    } else {
+      res.status(404).json({ error: 'User not found' });
+    }
+  } catch (err) {
+    res.status(500).json({ error: 'Block action failed', details: err });
+  }
+});
+
+app.get('/admin/analytics', async (req, res) => {
+  try {
+    const totalUsers = await db.collection('users').countDocuments();
+    const totalRides = await db.collection('rides').countDocuments();
+    res.status(200).json({ totalUsers, totalRides });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch analytics', details: err });
+  }
+});
+
+// 🔐 UNIVERSAL LOGIN ENDPOINT
+app.post('/auth/login', async (req, res) => {
+  const { email, password } = req.body;
+
+  console.log("Login attempt:", { email, password });
+
+  try {
+    const user = await db.collection('users').findOne({ email, password });
+
+    console.log("User found:", user);
+
+    if (!user) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    const role =
+      typeof user.role === 'string'
+        ? user.role.charAt(0).toUpperCase() + user.role.slice(1)
+        : 'User';
+
+    res.status(200).json({
+      message: `${role} login successful`,
+      user
+    });
+  } catch (err) {
+    console.error("Login error:", err);
+    res.status(500).json({ error: 'Login failed', details: err.message });
+  }
+});
+
+// ADD DESTINATION (customer request)
+app.post('/destinations', async (req, res) => {
+  const { pickup, dropoff, customerId } = req.body;
+
+  if (!pickup || !dropoff || !customerId) {
+    return res.status(400).json({ error: 'pickup, dropoff, and customerId are required' });
+  }
+
+  try {
+    const destination = { pickup, dropoff, customerId, createdAt: new Date() };
+    const result = await db.collection('destinations').insertOne(destination);
+    res.status(201).json({ message: 'Destination added', id: result.insertedId });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to add destination', details: err });
+  }
+});
+
+// ✅ Start Server
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
 });
