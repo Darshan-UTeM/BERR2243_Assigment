@@ -205,10 +205,14 @@ app.patch('/drivers/:id/status', async (req, res) => {
   }
 
   try {
+    console.log("Updating driver:", id, "to status:", status);
+
     const result = await db.collection('users').updateOne(
       { _id: new ObjectId(id), role: 'driver' },
       { $set: { status } }
     );
+
+    console.log("Update result:", result);
 
     if (result.modifiedCount === 1) {
       res.status(200).json({ message: 'Driver status updated' });
