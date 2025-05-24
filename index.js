@@ -1,11 +1,14 @@
 const express = require('express');
 const { MongoClient, ObjectId } = require('mongodb');
-const cors = require('cors'); // ✅ Added CORS
+const cors = require('cors');
+const bcrypt = require('bcrypt');
+require('dotenv').config(); // ✅ Load .env variables
+const jwt = require('jsonwebtoken');
 
 const port = 3000;
 
 const app = express();
-app.use(cors()); // ✅ Enable CORS
+app.use(cors());
 app.use(express.json());
 
 let db;
@@ -25,11 +28,38 @@ async function connectToMongoDB() {
 
 connectToMongoDB();
 
+// 🔐 JWT Middleware
+const authenticate = (req, res, next) => {
+  const authHeader = req.headers.authorization;
+
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).json({ error: "Unauthorized: No token provided" });
+  }
+
+  const token = authHeader.split(" ")[1];
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: "Invalid token" });
+  }
+};
+
+const authorize = (roles) => {
+  return (req, res, next) => {
+    if (!roles.includes(req.user.role)) {
+      return res.status(403).json({ error: "Forbidden: Access denied" });
+    }
+    next();
+  };
+};
+
 app.get('/', (req, res) => {
   res.send('🚕 Ride-hailing API is up and connected to MongoDB!');
 });
 
-// ✅ 1. GET /rides – Fetch all rides
 app.get('/rides', async (req, res) => {
   try {
     const rides = await db.collection('rides').find().toArray();
@@ -39,7 +69,6 @@ app.get('/rides', async (req, res) => {
   }
 });
 
-// ✅ 2. POST /rides – Create a new ride
 app.post('/rides', async (req, res) => {
   const ride = req.body;
 
@@ -54,7 +83,6 @@ app.post('/rides', async (req, res) => {
   }
 });
 
-// ✅ 3. PATCH /rides/:id – Update ride status
 app.patch('/rides/:id', async (req, res) => {
   const rideId = req.params.id;
   const { status } = req.body;
@@ -75,7 +103,6 @@ app.patch('/rides/:id', async (req, res) => {
   }
 });
 
-// ✅ 4. DELETE /rides/:id – Cancel a ride
 app.delete('/rides/:id', async (req, res) => {
   const rideId = req.params.id;
 
@@ -92,15 +119,17 @@ app.delete('/rides/:id', async (req, res) => {
   }
 });
 
-// USERS ENDPOINTS (CRUD)
-
+// USERS ENDPOINTS
 app.post('/users', async (req, res) => {
   try {
-    const user = req.body;
+    const { email, password, role } = req.body;
 
-    if (!user.role) {
+    if (!role) {
       return res.status(400).json({ error: 'User role is required (e.g., customer or driver)' });
     }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const user = { email, password: hashedPassword, role };
 
     const result = await db.collection('users').insertOne(user);
     res.status(201).json({ message: 'User created', userId: result.insertedId });
@@ -154,29 +183,7 @@ app.delete('/users/:id', async (req, res) => {
   }
 });
 
-app.post('/auth/customer', async (req, res) => {
-  const { email, password } = req.body;
-  try {
-    const user = await db.collection('users').findOne({ email, password, role: 'customer' });
-    if (!user) return res.status(401).json({ error: 'Invalid credentials' });
-    res.status(200).json({ message: 'Customer login successful', user });
-  } catch (err) {
-    res.status(500).json({ error: 'Login failed', details: err });
-  }
-});
-
-app.post('/auth/driver', async (req, res) => {
-  const { email, password } = req.body;
-  try {
-    const driver = await db.collection('users').findOne({ email, password, role: 'driver' });
-    if (!driver) return res.status(401).json({ error: 'Invalid credentials' });
-    res.status(200).json({ message: 'Driver login successful', driver });
-  } catch (err) {
-    res.status(500).json({ error: 'Login failed', details: err });
-  }
-});
-
-// 🚗 DRIVER APIs
+// DRIVER APIs
 app.patch('/drivers/:id/availability', async (req, res) => {
   const { id } = req.params;
   const { availability } = req.body;
@@ -195,7 +202,6 @@ app.patch('/drivers/:id/availability', async (req, res) => {
   }
 });
 
-// ✅ UPDATED: PATCH /drivers/:id/status - Update driver status using MongoDB
 app.patch('/drivers/:id/status', async (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
@@ -205,14 +211,10 @@ app.patch('/drivers/:id/status', async (req, res) => {
   }
 
   try {
-    console.log("Updating driver:", id, "to status:", status);
-
     const result = await db.collection('users').updateOne(
       { _id: new ObjectId(id), role: 'driver' },
       { $set: { status } }
     );
-
-    console.log("Update result:", result);
 
     if (result.modifiedCount === 1) {
       res.status(200).json({ message: 'Driver status updated' });
@@ -224,20 +226,15 @@ app.patch('/drivers/:id/status', async (req, res) => {
   }
 });
 
-// ✅ UPDATED: DELETE /admin/users/:id - Block/Delete user using MongoDB
-app.delete('/admin/users/:id', async (req, res) => {
+// 🔐 Admin-only DELETE user route
+app.delete('/admin/users/:id', authenticate, authorize(['admin']), async (req, res) => {
   const { id } = req.params;
-  const { requesterRole } = req.body;
-
-  if (requesterRole !== 'admin') {
-    return res.status(403).json({ message: 'Access denied. Admins only.' });
-  }
 
   try {
     const result = await db.collection('users').deleteOne({ _id: new ObjectId(id) });
 
     if (result.deletedCount === 1) {
-      res.status(204).send(); // No Content
+      res.status(204).send();
     } else {
       res.status(404).json({ message: 'User not found' });
     }
@@ -246,7 +243,6 @@ app.delete('/admin/users/:id', async (req, res) => {
   }
 });
 
-// 🛡️ ADMIN APIs
 app.patch('/admin/users/:id/block', async (req, res) => {
   const { id } = req.params;
   const { blocked } = req.body;
@@ -275,29 +271,31 @@ app.get('/admin/analytics', async (req, res) => {
   }
 });
 
-// 🔐 UNIVERSAL LOGIN ENDPOINT
 app.post('/auth/login', async (req, res) => {
   const { email, password } = req.body;
 
-  console.log("Login attempt:", { email, password });
+  console.log("Login attempt:", { email });
 
   try {
-    const user = await db.collection('users').findOne({ email, password });
+    const user = await db.collection('users').findOne({ email });
 
-    console.log("User found:", user);
-
-    if (!user) {
+    if (!user || !(await bcrypt.compare(password, user.password))) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    const role =
-      typeof user.role === 'string'
-        ? user.role.charAt(0).toUpperCase() + user.role.slice(1)
-        : 'User';
+    const role = typeof user.role === 'string'
+      ? user.role.charAt(0).toUpperCase() + user.role.slice(1)
+      : 'User';
+
+    const token = jwt.sign(
+      { userId: user._id, role: user.role },
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRES_IN }
+    );
 
     res.status(200).json({
       message: `${role} login successful`,
-      user
+      token
     });
   } catch (err) {
     console.error("Login error:", err);
@@ -305,7 +303,6 @@ app.post('/auth/login', async (req, res) => {
   }
 });
 
-// ADD DESTINATION (customer request)
 app.post('/destinations', async (req, res) => {
   const { pickup, dropoff, customerId } = req.body;
 
