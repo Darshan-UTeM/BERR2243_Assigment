@@ -109,34 +109,6 @@ async function connectToMongoDB() {
 
 connectToMongoDB();
 
-// 🔐 JWT Middleware
-const authenticate = (req, res, next) => {
-  const authHeader = req.headers.authorization;
-
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return res.status(401).json({ error: "Unauthorized: No token provided" });
-  }
-
-  const token = authHeader.split(" ")[1];
-
-  try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = decoded;
-    next();
-  } catch (err) {
-    return res.status(401).json({ error: "Invalid token" });
-  }
-};
-
-const authorize = (roles) => {
-  return (req, res, next) => {
-    if (!roles.includes(req.user.role)) {
-      return res.status(403).json({ error: "Forbidden: Access denied" });
-    }
-    next();
-  };
-};
-
 app.get('/', (req, res) => {
   res.send('🚕 Ride-hailing API is up and connected to MongoDB!');
 });
@@ -162,23 +134,59 @@ app.post('/rides', authenticate, authorize(['passenger']), async (req, res) => {
   }
 });
 
-app.patch('/rides/:id', authenticate, authorize(['driver']), async (req, res) => {
+app.patch('/rides/:id/accept', authenticate, authorize(['driver']), async (req, res) => {
   const rideId = req.params.id;
-  const { status } = req.body;
 
   try {
     const result = await db.collection('rides').updateOne(
-      { _id: new ObjectId(rideId) },
-      { $set: { status } }
+      { _id: new ObjectId(rideId), status: 'requested' },
+      {
+        $set: {
+          status: 'accepted',
+          driverId: new ObjectId(req.user.userId),
+          acceptedAt: new Date()
+        }
+      }
     );
 
     if (result.matchedCount === 0) {
-      return res.status(404).json({ error: 'Ride not found' });
+      return res.status(404).json({ error: 'Ride not found or already accepted' });
     }
 
-    res.json({ message: 'Ride status updated' });
+    res.status(200).json({ message: 'Ride accepted' });
   } catch (err) {
-    res.status(500).json({ error: 'Failed to update ride', details: err });
+    res.status(500).json({ error: 'Failed to accept ride', details: err });
+  }
+});
+
+// ✅ Complete Ride (driver only)
+app.patch('/rides/:id/complete', authenticate, authorize(['driver']), async (req, res) => {
+  const rideId = req.params.id;
+  const { fare } = req.body;
+
+  if (!fare) {
+    return res.status(400).json({ error: 'Fare is required to complete the ride' });
+  }
+
+  try {
+    const result = await db.collection('rides').updateOne(
+      { _id: new ObjectId(rideId), status: 'accepted' },
+      {
+        $set: {
+          status: 'completed',
+          fare,
+          completedAt: new Date()
+        }
+      }
+    );
+
+    if (result.modifiedCount === 0) {
+      return res.status(404).json({ error: 'Ride not found or already completed' });
+    }
+
+    res.status(200).json({ message: 'Ride completed successfully' });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to complete ride', details: err });
   }
 });
 
@@ -389,7 +397,12 @@ app.post('/auth/register', async (req, res) => {
       return res.status(400).json({ error: 'Email, password, and role are required' });
     }
 
+    // ✅ Debug log to help trace duplicates
+    console.log("Registering:", email);
+
     const existingUser = await db.collection('users').findOne({ email });
+    console.log("Existing user?", existingUser); // Will log null or the existing user
+
     if (existingUser) {
       return res.status(400).json({ error: 'User with this email already exists' });
     }
