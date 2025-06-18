@@ -9,7 +9,6 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": "",
   "dependencies": {
     "bcrypt": "^6.0.0",
     "body-parser": "^2.2.0",
@@ -17,6 +16,16 @@
     "dotenv": "^16.5.0",
     "express": "^5.1.0",
     "jsonwebtoken": "^9.0.2",
-    "mongodb": "^6.15.0"
-  }
+    "mongodb": "^6.15.0",
+    "mongoose": "^8.16.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Darshan-UTeM/Week-7.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Darshan-UTeM/Week-7/issues"
+  },
+  "homepage": "https://github.com/Darshan-UTeM/Week-7#readme",
+  "description": ""
 }

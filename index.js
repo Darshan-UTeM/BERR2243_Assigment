@@ -13,6 +13,75 @@ app.use(express.json());
 
 let db;
 
+// 🔐 JWT Middleware
+const authenticate = (req, res, next) => {
+  const authHeader = req.headers.authorization;
+
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).json({ error: "Unauthorized: No token provided" });
+  }
+
+  const token = authHeader.split(" ")[1];
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: "Invalid token" });
+  }
+};
+
+const authorize = (roles) => {
+  return (req, res, next) => {
+    if (!roles.includes(req.user.role)) {
+      return res.status(403).json({ error: "Forbidden: Access denied" });
+    }
+    next();
+  };
+};
+
+// ✅ Payments API
+app.post('/payments', authenticate, authorize(['passenger']), async (req, res) => {
+  const { rideId, amount, method } = req.body;
+
+  if (!rideId || !amount || !method) {
+    return res.status(400).json({ error: 'rideId, amount, and method are required' });
+  }
+
+  try {
+    const payment = {
+      rideId: new ObjectId(rideId),
+      userId: new ObjectId(req.user.userId),
+      amount,
+      method,
+      status: 'paid',
+      createdAt: new Date()
+    };
+
+    const result = await db.collection('payments').insertOne(payment);
+    res.status(201).json({ message: 'Payment recorded', paymentId: result.insertedId });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to record payment', details: err });
+  }
+});
+
+app.get('/payments/:id', authenticate, async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const payment = await db.collection('payments').findOne({ _id: new ObjectId(id) });
+
+    if (!payment) {
+      return res.status(404).json({ error: 'Payment not found' });
+    }
+
+    res.status(200).json(payment);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch payment', details: err });
+  }
+});
+
 async function connectToMongoDB() {
   const uri = "mongodb://localhost:27017";
   const client = new MongoClient(uri);
@@ -22,7 +91,13 @@ async function connectToMongoDB() {
     console.log("Connected to MongoDB!");
     db = client.db("testDB");
 
-    // ✅ Start the server after MongoDB is connected
+    // ✅ Simple /login route added for Wireshark test
+    app.post('/login', (req, res) => {
+      const { username, password } = req.body;
+      console.log(`Test login attempt: ${username} / ${password}`);
+      res.status(200).json({ message: 'Login received', username });
+    });
+
     app.listen(port, () => {
       console.log(`Server running on port ${port}`);
     });
@@ -66,7 +141,7 @@ app.get('/', (req, res) => {
   res.send('🚕 Ride-hailing API is up and connected to MongoDB!');
 });
 
-app.get('/rides', async (req, res) => {
+app.get('/rides', authenticate, authorize(['passenger', 'driver']), async (req, res) => {
   try {
     const rides = await db.collection('rides').find().toArray();
     res.status(200).json(rides);
@@ -75,9 +150,7 @@ app.get('/rides', async (req, res) => {
   }
 });
 
-app.post('/rides', async (req, res) => {
-  const ride = req.body;
-
+app.post('/rides', authenticate, authorize(['passenger']), async (req, res) => {  const ride = req.body;
   try {
     const result = await db.collection('rides').insertOne(ride);
     res.status(201).json({
@@ -89,7 +162,7 @@ app.post('/rides', async (req, res) => {
   }
 });
 
-app.patch('/rides/:id', async (req, res) => {
+app.patch('/rides/:id', authenticate, authorize(['driver']), async (req, res) => {
   const rideId = req.params.id;
   const { status } = req.body;
 
@@ -109,7 +182,7 @@ app.patch('/rides/:id', async (req, res) => {
   }
 });
 
-app.delete('/rides/:id', async (req, res) => {
+app.delete('/rides/:id', authenticate, authorize(['passenger']), async (req, res) => {
   const rideId = req.params.id;
 
   try {
@@ -246,7 +319,7 @@ app.delete('/admin/users/:id', authenticate, authorize(['admin', 'driver']), asy
   }
 });
 
-app.patch('/admin/users/:id/block', async (req, res) => {
+app.patch('/admin/users/:id/block', authenticate, authorize(['admin']), async (req, res) => {
   const { id } = req.params;
   const { blocked } = req.body;
   try {
@@ -264,7 +337,7 @@ app.patch('/admin/users/:id/block', async (req, res) => {
   }
 });
 
-app.get('/admin/analytics', async (req, res) => {
+app.get('/admin/analytics', authenticate, authorize(['admin']), async (req, res) => {
   try {
     const totalUsers = await db.collection('users').countDocuments();
     const totalRides = await db.collection('rides').countDocuments();
@@ -278,6 +351,7 @@ app.post('/auth/login', async (req, res) => {
   const { email, password } = req.body;
 
   console.log("Login attempt:", { email });
+  console.log("Received login body:", req.body);
 
   try {
     const user = await db.collection('users').findOne({ email });
@@ -306,7 +380,36 @@ app.post('/auth/login', async (req, res) => {
   }
 });
 
-app.post('/destinations', async (req, res) => {
+// ✅ NEW: /auth/register endpoint
+app.post('/auth/register', async (req, res) => {
+  const { email, password, role } = req.body;
+
+  try {
+    if (!email || !password || !role) {
+      return res.status(400).json({ error: 'Email, password, and role are required' });
+    }
+
+    const existingUser = await db.collection('users').findOne({ email });
+    if (existingUser) {
+      return res.status(400).json({ error: 'User with this email already exists' });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const newUser = {
+      email,
+      password: hashedPassword,
+      role,
+      createdAt: new Date()
+    };
+
+    const result = await db.collection('users').insertOne(newUser);
+    res.status(201).json({ message: 'User registered successfully', userId: result.insertedId });
+  } catch (err) {
+    res.status(500).json({ error: 'Registration failed', details: err.message });
+  }
+});
+
+app.post('/destinations', authenticate, authorize(['passenger']), async (req, res) => {
   const { pickup, dropoff, customerId } = req.body;
 
   if (!pickup || !dropoff || !customerId) {
